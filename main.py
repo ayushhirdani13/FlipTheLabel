@@ -1,3 +1,4 @@
+from csv import writer
 import os
 from time import time
 import argparse
@@ -9,6 +10,7 @@ import torch.optim as optim
 import torch.utils.data as data
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
+from tensorboardX import SummaryWriter
 
 import model
 import data_utils
@@ -62,15 +64,8 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=0.001, help="learning rate")
     parser.add_argument("--dropout", type=float, default=0.0, help="dropout rate")
     parser.add_argument("--epochs", type=int, default=10, help="training epoches")
-    parser.add_argument("--eval_freq", type=int, default=2000, help="the freq of eval")
     parser.add_argument(
         "--top_k", type=int, nargs=2, default=[3, 20], help="compute metrics@top_k"
-    )
-    parser.add_argument(
-        "--test_batch_size",
-        type=int,
-        default=2048,
-        help="batch size for testing and evaluating",
     )
     parser.add_argument(
         "--factor_num",
@@ -102,13 +97,21 @@ def drop_rate_schedule(iteration):
     else:
         return args.drop_rate
 
+
 ########################### Test #####################################
 def test(model, test_data_pos, user_pos):
     top_k = args.top_k
     model.eval()
     precision, recall, NDCG, MRR = evaluate.test_all_users(
-        model, args.test_batch_size, item_num, test_data_pos, user_pos, top_k
+        model, item_num - 1, item_num, test_data_pos, user_pos, top_k
     )
+
+    test_results = {
+        "precision": precision,
+        "recall": recall,
+        "NDCG": NDCG,
+        "MRR": MRR,
+    }
 
     print(f"################### TEST ######################")
     print(f"Recall@{top_k[0]}: {recall[0]:.4f} Recall@{top_k[1]}:{recall[1]:.4f}")
@@ -119,7 +122,8 @@ def test(model, test_data_pos, user_pos):
     print(f"MRR@{top_k[0]}: {MRR[0]:.4f} MRR@{top_k[1]}:{MRR[1]:.4f}")
     print("################### TEST END ######################")
 
-    return recall[0]
+    return recall[0], test_results
+
 
 ########################### Eval #####################################
 def evalModel(model, valid_loader, best_loss, best_recall, count):
@@ -134,19 +138,28 @@ def evalModel(model, valid_loader, best_loss, best_recall, count):
         flips = flips.float().cuda()
 
         prediction = model(user, item)
-        if args.mode == 'flip':
-            loss, _ = flip_loss(y=prediction, label=label, flips=flips, drop_rate=drop_rate_schedule(count))
-        elif args.mode == 'truncated':
-            loss = truncated_loss(y=prediction, label=label, drop_rate=drop_rate_schedule(count))
+        if args.mode == "flip":
+            loss_all, _ = flip_loss(
+                y=prediction,
+                label=label,
+                flips=flips,
+                drop_rate=drop_rate_schedule(count),
+            )
+            loss = loss_all.mean()
+        elif args.mode == "truncated":
+            loss_all = truncated_loss(
+                y=prediction, label=label, drop_rate=drop_rate_schedule(count)
+            )
+            loss = loss_all.mean()
         else:
             loss = F.binary_cross_entropy_with_logits(prediction, label)
         epoch_loss += loss.detach()
     print("################### EVAL ######################")
     print("Eval loss:{}".format(epoch_loss))
-    epoch_recall = test(model, test_data_pos, user_pos)
+    recall, test_results = test(model, test_data_pos, user_pos)
 
-    if epoch_recall > best_recall:
-        best_recall = epoch_recall
+    if recall > best_recall:
+        best_recall = recall
         if args.out:
             if not os.path.exists(model_path):
                 os.makedirs(model_path)
@@ -156,9 +169,7 @@ def evalModel(model, valid_loader, best_loss, best_recall, count):
                     model_path, args.model, args.mode, args.drop_rate, args.num_gradual
                 ),
             )
-    return best_loss, best_recall
-
-
+    return best_loss, best_recall, test_results
 
 
 if __name__ == "__main__":
@@ -254,27 +265,33 @@ if __name__ == "__main__":
 
     ###################### TRAINING ##########################
 
+    print(
+        "############################## Training Start. ##############################"
+    )
+    writer = SummaryWriter(f"runs/{args.dataset}_{args.model}_{args.mode}")
+    print("Initial Advantage Ratio: {:.4f}".format(train_dataset.get_advantage_ratio()))
     best_loss, best_recall = 1e9, 0
     count = 0
+    test_results = []
     for epoch in range(args.epochs):
         model.train()
         train_loader.dataset.ng_sample()  # negative sampling
         if args.mode == "flip" and epoch == args.flip_e1:
             print("############ Flip starts ############")
-        if args.mode == "flip" and epoch == args.flip_e2+1:
+        if args.mode == "flip" and epoch == args.flip_e2 + 1:
             print("############ Flip ends ############")
         for user, item, label, noisy_or_not, flip, idx in train_loader:
             user = user.cuda()
             item = item.cuda()
             label = label.float().cuda()
-            # noisy_or_not = noisy_or_not.float().cuda()
+            noisy_or_not = noisy_or_not.float().cuda()
             flip = flip.float().cuda()
 
             model.zero_grad()
             prediction = model(user, item)
             if args.mode == "flip":
                 if args.flip_e1 <= epoch <= args.flip_e2:
-                    loss, flip_inds = flip_loss(
+                    loss_all, flip_inds = flip_loss(
                         y=prediction,
                         label=label,
                         flips=flip,
@@ -283,23 +300,96 @@ if __name__ == "__main__":
                     flip_inds = idx[flip_inds].tolist()
                     train_loader.dataset.flip_labels(flip_inds)
                 else:
-                    loss = F.binary_cross_entropy_with_logits(prediction, flip)
+                    loss_all = F.binary_cross_entropy_with_logits(
+                        prediction, flip, reduction="none"
+                    )
+                loss = loss_all.mean()
             elif args.mode == "truncated":
                 loss = truncated_loss(
                     y=prediction, label=label, drop_rate=drop_rate_schedule(count)
                 )
+                loss_all = F.binary_cross_entropy_with_logits(
+                    prediction, label, reduction="none"
+                )
             else:
-                loss = F.binary_cross_entropy_with_logits(prediction, label)
+                loss_all = F.binary_cross_entropy_with_logits(
+                    prediction, label, reduction="none"
+                )
+                loss = loss_all.mean()
+
+            true_mask = (noisy_or_not == 1) & (label == 1)
+            noisy_mask = (noisy_or_not == 0) & (label == 1)
+            neg_mask = label == 0
+
+            tp_loss = loss_all[true_mask].mean()
+            noisy_loss = loss_all[noisy_mask].mean()
+            neg_loss = loss_all[neg_mask].mean()
+
+            writer.add_scalars(
+                "Training Losses",
+                {
+                    "Training Loss": loss,
+                    "True Positive Loss": tp_loss,
+                    "Noisy Loss": noisy_loss,
+                    "Negative Loss": neg_loss,
+                },
+                count,
+            )
 
             loss.backward()
             optimizer.step()
 
             count += 1
         print("epoch: {}, iter: {}, loss:{}".format(epoch, count, loss))
-        best_loss, best_recall = evalModel(model, valid_loader, best_loss, best_recall, count)
+        best_loss, curr_recall, curr_test_results = evalModel(
+            model, valid_loader, best_loss, best_recall, count
+        )
+        test_results.append(curr_test_results)
+        if curr_recall > best_recall:
+            best_recall = curr_recall
+            best_recall_idx = epoch
+
+        writer.add_scalars(
+            "Testing Metrics",
+            {
+                f"Recall@{args.top_k[0]}": curr_test_results["recall"][0],
+                f"Recall@{args.top_k[1]}": curr_test_results["recall"][1],
+                f"NDCG@{args.top_k[0]}": curr_test_results["NDCG"][0],
+                f"NDCG@{args.top_k[1]}": curr_test_results["NDCG"][1],
+                f"Precision@{args.top_k[0]}": curr_test_results["precision"][0],
+                f"Precision@{args.top_k[1]}": curr_test_results["precision"][1],
+                f"MRR@{args.top_k[0]}": curr_test_results["MRR"][0],
+                f"MRR@{args.top_k[1]}": curr_test_results["MRR"][1],
+            },
+            epoch,
+        )
         model.train()
 
+    writer.flush()
+    writer.close()
     print("############################## Training End. ##############################")
 
-    print("Best recall:{}".format(best_recall))
+    if args.mode == "flip":
+        print(
+            "Final Advantage Ratio after Flipping: {:.4f}".format(
+                train_dataset.get_advantage_ratio()
+            )
+        )
+
+    print("Best recall:{:.4f}".format(best_recall))
+    print("Best Recall Epoch:{}".format(best_recall_idx))
+    print("Best Recall Metrics:")
+    best_results = test_results[best_recall_idx]
+    print(
+        f"Recall@{args.top_k[0]}: {best_results['recall'][0]:.4f} Recall@{args.top_k[1]}:{best_results['recall'][1]:.4f}"
+    )
+    print(
+        f"NDCG@{args.top_k[0]}: {best_results['NDCG'][0]:.4f} NDCG@{args.top_k[1]}:{best_results['NDCG'][1]:.4f}"
+    )
+    print(
+        f"Precision@{args.top_k[0]}: {best_results['precision'][0]:.4f} Precision@{args.top_k[1]}:{best_results['precision'][1]:.4f}"
+    )
+    print(
+        f"MRR@{args.top_k[0]}: {best_results['MRR'][0]:.4f} MRR@{args.top_k[1]}:{best_results['MRR'][1]:.4f}"
+    )
     print("Best recall model saved at : {}".format(model_path))
