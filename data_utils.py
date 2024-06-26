@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from torch import indices_copy
 import torch.utils.data as data
 
 
@@ -153,10 +154,11 @@ class NCFData(data.Dataset):
     def flip_labels(self, indices):
         assert self.is_training != 2, "no flipping when testing"
 
-        self.flips_fill = np.array(self.flips_fill)
+        self.flips = np.array(self.flips)
         indices = np.array(indices, dtype=np.int32)
-        self.flips_fill[indices] = 0
-        # self.flips_fill = self.flips_fill.tolist()
+        valid_indices = indices[indices < len(self.flips)]
+        self.flips[valid_indices] = 0
+
 
     def get_advantage_ratio(self):
         try:
@@ -166,6 +168,9 @@ class NCFData(data.Dataset):
             false_mask = (flips == 0) & (noisy_or_not == 1)
             numerator = true_mask.sum()
             denominator = false_mask.sum()
+            print("Total Flips: ", numerator + denominator)
+            print("True Flips: ", numerator)
+            print("False Flips: ", denominator)
             if denominator == 0:
                 return 0
             advantage_ratio = numerator / denominator

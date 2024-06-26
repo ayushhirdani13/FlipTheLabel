@@ -5,6 +5,7 @@ import argparse
 import random
 import numpy as np
 
+import pandas as pd
 import torch
 import torch.optim as optim
 import torch.utils.data as data
@@ -65,7 +66,7 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.0, help="dropout rate")
     parser.add_argument("--epochs", type=int, default=10, help="training epoches")
     parser.add_argument(
-        "--top_k", type=int, nargs=2, default=[3, 20], help="compute metrics@top_k"
+        "--top_k", type=int, nargs='+', default=[3, 20], help="compute metrics@top_k"
     )
     parser.add_argument(
         "--factor_num",
@@ -96,6 +97,15 @@ def drop_rate_schedule(iteration):
         return drop_rate[iteration]
     else:
         return args.drop_rate
+    
+def get_results_dict(results, top_k):
+    results_dict = {}
+    for i, k in enumerate(top_k):
+        results_dict[f"Recall@{k}"] = results["recall"][i]
+        results_dict[f"NDCG@{k}"] = results["NDCG"][i]
+        results_dict[f"Precision@{k}"] = results["precision"][i]
+        results_dict[f"MRR@{k}"] = results["MRR"][i]
+    return results_dict
 
 
 ########################### Test #####################################
@@ -113,13 +123,11 @@ def test(model, test_data_pos, user_pos):
         "MRR": MRR,
     }
 
+    test_results_dict = get_results_dict(test_results, top_k)
+
     print(f"################### TEST ######################")
-    print(f"Recall@{top_k[0]}: {recall[0]:.4f} Recall@{top_k[1]}:{recall[1]:.4f}")
-    print(f"NDCG@{top_k[0]}: {NDCG[0]:.4f} NDCG@{top_k[1]}:{NDCG[1]:.4f}")
-    print(
-        f"Precision@{top_k[0]}: {precision[0]:.4f} Precision@{top_k[1]}:{precision[1]:.4f}"
-    )
-    print(f"MRR@{top_k[0]}: {MRR[0]:.4f} MRR@{top_k[1]}:{MRR[1]:.4f}")
+    for k, v in test_results_dict.items():
+        print(f"{k}: {v:.4f}")
     print("################### TEST END ######################")
 
     return recall[0], test_results
@@ -273,6 +281,7 @@ if __name__ == "__main__":
     best_loss, best_recall = 1e9, 0
     count = 0
     test_results = []
+    results_df = pd.DataFrame()
     for epoch in range(args.epochs):
         model.train()
         train_loader.dataset.ng_sample()  # negative sampling
@@ -349,20 +358,9 @@ if __name__ == "__main__":
             best_recall = curr_recall
             best_recall_idx = epoch
 
-        writer.add_scalars(
-            "Testing Metrics",
-            {
-                f"Recall@{args.top_k[0]}": curr_test_results["recall"][0],
-                f"Recall@{args.top_k[1]}": curr_test_results["recall"][1],
-                f"NDCG@{args.top_k[0]}": curr_test_results["NDCG"][0],
-                f"NDCG@{args.top_k[1]}": curr_test_results["NDCG"][1],
-                f"Precision@{args.top_k[0]}": curr_test_results["precision"][0],
-                f"Precision@{args.top_k[1]}": curr_test_results["precision"][1],
-                f"MRR@{args.top_k[0]}": curr_test_results["MRR"][0],
-                f"MRR@{args.top_k[1]}": curr_test_results["MRR"][1],
-            },
-            epoch,
-        )
+        curr_results_dict = get_results_dict(curr_test_results, args.top_k)
+        curr_results_df = pd.DataFrame(curr_results_dict, index=[epoch])
+        results_df = pd.concat([results_df, curr_results_df])
         model.train()
 
     writer.flush()
@@ -376,20 +374,19 @@ if __name__ == "__main__":
             )
         )
 
+    print("Results Dataframe:")
+    print(results_df)
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    results_df.to_csv(
+        f"results/{args.dataset}_{args.model}_{args.mode}_{args.drop_rate}_{args.num_gradual}.csv",
+        float_format="%.4f",
+    )
+    print("#" * 20)
     print("Best recall:{:.4f}".format(best_recall))
     print("Best Recall Epoch:{}".format(best_recall_idx))
     print("Best Recall Metrics:")
     best_results = test_results[best_recall_idx]
-    print(
-        f"Recall@{args.top_k[0]}: {best_results['recall'][0]:.4f} Recall@{args.top_k[1]}:{best_results['recall'][1]:.4f}"
-    )
-    print(
-        f"NDCG@{args.top_k[0]}: {best_results['NDCG'][0]:.4f} NDCG@{args.top_k[1]}:{best_results['NDCG'][1]:.4f}"
-    )
-    print(
-        f"Precision@{args.top_k[0]}: {best_results['precision'][0]:.4f} Precision@{args.top_k[1]}:{best_results['precision'][1]:.4f}"
-    )
-    print(
-        f"MRR@{args.top_k[0]}: {best_results['MRR'][0]:.4f} MRR@{args.top_k[1]}:{best_results['MRR'][1]:.4f}"
-    )
-    print("Best recall model saved at : {}".format(model_path))
+    best_results_dict = get_results_dict(best_results, args.top_k)
+    for k, v in best_results_dict.items():
+        print(f"{k}: {v:.4f}")
