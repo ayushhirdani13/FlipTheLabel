@@ -149,7 +149,7 @@ class NCFData(data.Dataset):
         self.features_fill = self.features_ps + self.features_ng
         assert len(self.noisy_or_not_fill) == len(self.features_fill)
         self.labels_fill = labels_ps + labels_ng
-        self.flips_fill = flips_ps + flips_ng
+        self.flips_fill = np.append(flips_ps, flips_ng)
 
     def flip_labels(self, indices):
         assert self.is_training != 2, "no flipping when testing"
