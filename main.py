@@ -181,6 +181,8 @@ def evalModel(model, valid_loader, best_loss, best_recall, count):
 
 
 if __name__ == "__main__":
+    start_time = time()
+
     args = parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -390,3 +392,6 @@ if __name__ == "__main__":
     best_results_dict = get_results_dict(best_results, args.top_k)
     for k, v in best_results_dict.items():
         print(f"{k}: {v:.4f}")
+
+    end_time = time()
+    print("Total Time: {:.2f}s".format(end_time - start_time))
