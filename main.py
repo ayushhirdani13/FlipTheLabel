@@ -333,7 +333,7 @@ if __name__ == "__main__":
             neg_mask = label == 0
 
             tp_loss = loss_all[true_mask].mean()
-            noisy_loss = loss_all[noisy_mask].mean()
+            fp_loss = loss_all[noisy_mask].mean()
             neg_loss = loss_all[neg_mask].mean()
 
             writer.add_scalars(
@@ -341,7 +341,7 @@ if __name__ == "__main__":
                 {
                     "Training Loss": loss,
                     "True Positive Loss": tp_loss,
-                    "Noisy Loss": noisy_loss,
+                    "False Positive Loss": fp_loss,
                     "Negative Loss": neg_loss,
                 },
                 count,
